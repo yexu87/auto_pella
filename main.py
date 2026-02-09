@@ -10,7 +10,6 @@ from pyvirtualdisplay import Display
 
 # ================= 配置区域 =================
 # 环境变量格式: email,password,server_id,tg_token,tg_chat_id
-# 多个账号换行
 ENV_VAR_NAME = "PELLA_BATCH"
 
 LOGIN_URL = "https://www.pella.app/login"
@@ -72,26 +71,40 @@ def run_pella_task(account_line):
 
     print(f"🚀 开始处理账号: {log_info['account']}")
 
+    # 使用 UC 模式 (Undetected Chromedriver)
     with SB(uc=True, test=True, locale="en") as sb:
         try:
-            # 1. 登录 (分两步)
+            # 1. 登录 (适配 Clerk 验证系统)
             print("👉 打开登录页面...")
-            sb.uc_open_with_reconnect(LOGIN_URL, 5)
+            sb.uc_open_with_reconnect(LOGIN_URL, 6)
             
-            # 输入邮箱 -> Continue
-            print("👉 输入邮箱...")
-            sb.type('input[type="email"]', email)
+            # --- 步骤 1: 输入邮箱 ---
+            print("👉 等待邮箱输入框 (Clerk)...")
+            # Clerk 的邮箱框 name 属性通常是 'identifier'
+            sb.wait_for_element('input[name="identifier"]', timeout=20)
+            
+            print(f"👉 输入邮箱: {email}")
+            sb.type('input[name="identifier"]', email)
+            sb.sleep(1) # 稍作停顿，模拟真人
+            
+            print("👉 点击 Continue...")
             sb.click('button:contains("Continue")')
             
-            # 等待跳转到 factor-one 并出现密码框
-            sb.wait_for_element('input[type="password"]', timeout=15)
+            # --- 步骤 2: 输入密码 ---
+            print("👉 等待密码输入框...")
+            # 等待跳转到输入密码界面 (Clerk 的密码框 name 通常是 'password')
+            sb.wait_for_element('input[name="password"]', timeout=20)
             
-            # 输入密码 -> Continue
             print("👉 输入密码...")
-            sb.type('input[type="password"]', password)
+            sb.type('input[name="password"]', password)
+            sb.sleep(1)
+            
+            print("👉 点击 Continue 登录...")
             sb.click('button:contains("Continue")')
             
-            # 等待登录成功 (Dashboard)
+            # --- 步骤 3: 等待登录完成 ---
+            # 等待跳转到 Dashboard 或出现服务器列表
+            print("👉 等待跳转主页...")
             sb.wait_for_element('a[href*="/server/"]', timeout=30)
             print("✅ 登录成功")
 
@@ -99,11 +112,10 @@ def run_pella_task(account_line):
             target_url = SERVER_URL_TEMPLATE.format(server_id=server_id)
             print(f"👉 进入服务器页面: {target_url}")
             sb.open(target_url)
-            sb.sleep(5) # 等待动态加载
+            sb.sleep(6) # 等待页面动态元素加载完毕
 
             # 3. 获取 IP (尝试在页面寻找 IP 格式文本)
             try:
-                # 假设页面有显示IP，尝试抓取，如果没有则用 ID 代替
                 body_text = sb.get_text("body")
                 ip_match = re.search(r'\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b', body_text)
                 if ip_match:
@@ -114,30 +126,32 @@ def run_pella_task(account_line):
                 pass
 
             # 4. 检查 Start/Stop 状态
+            # 使用更宽泛的选择器防止找不到
             if sb.is_element_visible('button:contains("START")'):
                 print("⚠️ 检测到服务器停止，正在启动...")
                 sb.click('button:contains("START")')
                 log_info["actions"].append("已执行启动")
-                sb.sleep(3)
+                sb.sleep(5) # 等待启动请求发送
                 log_info["status"] = "启动中 (Starting)"
             elif sb.is_element_visible('button:contains("STOP")'):
                 print("✅ 服务器运行中")
                 log_info["status"] = "运行中 (Running)"
             else:
-                log_info["status"] = "未知状态"
+                log_info["status"] = "未知状态 (未找到按钮)"
 
-            # 5. 获取剩余时间 (抓取 Start/Stop 按钮附近的文字)
-            # Pella 通常显示格式: "Your server expires in 1D 15H 30M."
+            # 5. 获取剩余时间
             try:
-                # 寻找包含 "expires in" 的 div 或 span
-                expiry_text_full = sb.get_text_content("body")
+                # 获取页面所有文本进行匹配
+                expiry_text_full = sb.get_text("body")
+                # 匹配格式: expires in 1D 15H 30M.
                 match = re.search(r"expires in\s+([\d\w\s]+)\.", expiry_text_full)
                 if match:
                     log_info["expiry"] = match.group(1).strip()
                 else:
-                    # 备用方案：查找特定元素
-                    log_info["expiry"] = sb.get_text(".text-muted") # 假设类名
-            except:
+                    # 尝试查找特定元素文本
+                    log_info["expiry"] = "未匹配到时间"
+            except Exception as e:
+                print(f"时间获取错误: {e}")
                 log_info["expiry"] = "获取失败"
             
             # 设置提示信息
@@ -148,58 +162,65 @@ def run_pella_task(account_line):
 
             # 6. 处理续期 (Claim)
             # 查找所有包含 "Claim" 的按钮
+            print("👉 检查续期按钮...")
             claim_buttons = sb.find_elements('button:contains("Claim")')
             clicked_count = 0
             
             if not claim_buttons:
-                log_info["actions"].append("未找到续期按钮")
+                print("未发现任何 Claim 按钮")
+                log_info["actions"].append("无按钮/已满")
             
             for btn in claim_buttons:
-                txt = btn.text
-                if "Claimed" in txt:
-                    continue # 已经领过了
-                
-                # 点击领取
-                print(f"👉 点击续期按钮: {txt}")
-                btn.click()
-                clicked_count += 1
-                sb.sleep(2)
+                try:
+                    txt = btn.text
+                    if "Claimed" in txt:
+                        continue # 已经领过了
+                    
+                    # 点击领取
+                    print(f"👉 点击续期: {txt}")
+                    btn.click()
+                    clicked_count += 1
+                    sb.sleep(3) # 等待点击反应
+                except:
+                    pass
             
             if clicked_count > 0:
                 log_info["actions"].append(f"成功续期 {clicked_count} 次")
-            else:
-                log_info["actions"].append("无需续期 (已满)")
+            
+            # 如果没有进行启动，也没有续期
+            if not log_info["actions"]:
+                 log_info["actions"].append("无需操作")
 
         except Exception as e:
             print(f"❌ 发生错误: {e}")
             log_info["status"] = "脚本执行出错"
-            log_info["actions"].append(str(e))
+            log_info["actions"].append(f"错误: {str(e)[:50]}") # 只截取前50字符防止报错过长
+            # 截图保存现场 (可选，方便调试)
+            try:
+                sb.save_screenshot("error_page.png")
+                print("已保存错误截图: error_page.png")
+            except:
+                pass
         
         finally:
             # 发送 TG 通知
             send_report(log_info, tg_token, tg_chat_id)
 
 def send_report(info, token, chat_id):
-    """
-    仿照要求的格式发送通知:
-    🎮 Pella 续期通知
-    🆔 账号: xm***15
-    🖥 IP: 85.131.251.209
-    ⏰ 时间: 2026-02-09 17:49:04
+    """发送 TG 通知"""
     
-    ℹ️ [操作结果]
-    📅 状态: [Running/Stopped]
-    ⏳ 剩余: 77時間27分
-    💡 提示: 剩余 > 24小时
-    """
+    action_str = " | ".join(info["actions"])
     
-    action_str = " | ".join(info["actions"]) if info["actions"] else "无需操作"
-    if "已执行启动" in action_str:
+    # 动态 Emoji
+    if "启动" in action_str:
         header_emoji = "⚠️"
         action_summary = "执行了启动操作"
     elif "成功续期" in action_str:
         header_emoji = "🎉"
         action_summary = "成功续期时长"
+    elif "错误" in action_str:
+        header_emoji = "❌"
+        action_summary = "脚本执行出错"
     else:
         header_emoji = "ℹ️"
         action_summary = "无需续期/保活"
@@ -214,6 +235,7 @@ def send_report(info, token, chat_id):
 📊 状态: {info['status']}
 ⏳ 剩余: <b>{info['expiry']}</b>
 💡 提示: {info['hint']}
+📝 详情: {action_str}
 """
     print("📤 发送通知中...")
     send_telegram(token, chat_id, msg)
@@ -223,6 +245,8 @@ if __name__ == "__main__":
     batch_data = os.getenv(ENV_VAR_NAME)
     if not batch_data:
         print(f"❌ 未找到环境变量 {ENV_VAR_NAME}")
+        # 本地测试用 (如果环境变量不存在)
+        # batch_data = "你的邮箱,密码,ID,Token,ChatID"
         sys.exit(1)
     
     display = setup_xvfb()
