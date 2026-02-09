@@ -61,7 +61,7 @@ def run_pella_task(account_line):
         "ip": "Unknown",
         "status": "Unknown",
         "expiry": "Unknown",
-        "renew_status": "无需续期", # 默认为无需
+        "renew_status": "无需续期",
         "hint": "",
         "logs": []
     }
@@ -79,15 +79,7 @@ def run_pella_task(account_line):
 
             # === 输入邮箱 ===
             print("👉 输入邮箱...")
-            if not sb.is_element_visible('input[name="identifier"]'):
-                # 备用选择器
-                if sb.is_element_visible('input[type="email"]'):
-                     sb.type('input[type="email"]', email + "\n")
-                else:
-                     raise Exception("找不到邮箱框")
-            else:
-                sb.type('input[name="identifier"]', email + "\n")
-            
+            sb.type('input[name="identifier"]', email + "\n")
             sb.sleep(5) 
 
             # === 输入密码 ===
@@ -123,10 +115,10 @@ def run_pella_task(account_line):
                 else: log["ip"] = f"ID: {server_id[:6]}..."
             except: pass
 
-            # [B] 判断服务器状态 & 启动逻辑 (最关键部分)
-            # 使用 XPath，不区分大小写
-            stop_xpath = "//button[contains(., 'STOP')]"
-            start_xpath = "//button[contains(., 'START')]"
+            # [B] 判断服务器状态 & 强力启动逻辑
+            # XPath 忽略大小写
+            stop_xpath = "//button[contains(translate(., 'STOP', 'stop'), 'stop')]"
+            start_xpath = "//button[contains(translate(., 'START', 'start'), 'start')]"
 
             # 先检查是否有 STOP (红色按钮)，如果有就是运行中
             if sb.is_element_visible(stop_xpath):
@@ -134,39 +126,46 @@ def run_pella_task(account_line):
                 log["status"] = "运行中"
             
             elif sb.is_element_visible(start_xpath):
-                print("⚠️ 状态: 已停止，准备启动...")
+                print("⚠️ 状态: 已停止，准备强力启动...")
                 log["status"] = "已停止"
                 
-                # --- 执行启动 ---
+                # --- JS 强力启动 ---
                 try:
-                    # 1. 点击 START
-                    print("👉 点击 START 按钮...")
-                    sb.click(start_xpath)
-                    sb.sleep(2)
+                    # 1. 获取按钮元素
+                    start_btn = sb.find_element(start_xpath)
                     
-                    # 2. 循环检查是否变更为 STOP (等待启动完成)
-                    print("👉 等待状态变更...")
-                    for i in range(10): # 等待 20秒
-                        if sb.is_element_visible(stop_xpath):
-                            print("✅ 启动成功！")
-                            log["status"] = "运行中"
-                            log["logs"].append("执行了启动操作")
-                            break
-                        sb.sleep(2)
+                    # 2. 使用 JavaScript 直接执行点击 (不经过鼠标模拟)
+                    print("👉 JS 触发启动事件...")
+                    sb.execute_script("arguments[0].click();", start_btn)
+                    sb.sleep(5)
                     
-                    if log["status"] == "已停止":
-                        log["logs"].append("点击启动但未变绿")
-                        log["status"] = "启动指令已发"
+                    # 3. 检查控制台是否有反应 (截图30显示会有 Starting...)
+                    console_text = sb.get_text("div.rounded-lg.bg-gray-900") # 尝试获取控制台区域文本
+                    if "Starting" in console_text:
+                        print("✅ 检测到控制台正在启动...")
+                        log["logs"].append("指令已发送(Console确认)")
+                    
+                    # 4. 强制刷新页面检查状态 (Pella 状态变绿很慢)
+                    print("👉 刷新页面检查状态...")
+                    sb.refresh()
+                    sb.sleep(8) # 等待加载
+                    
+                    if sb.is_element_visible(stop_xpath):
+                        print("✅ 启动成功！(状态已变红)")
+                        log["status"] = "运行中"
+                        log["logs"].append("启动成功")
+                    else:
+                        log["status"] = "启动中/未知"
+                        log["logs"].append("已尝试启动但未变绿")
                         
                 except Exception as e:
-                    print(f"❌ 启动点击失败: {e}")
-                    log["logs"].append("启动失败")
+                    print(f"❌ 启动失败: {e}")
+                    log["logs"].append("启动JS执行失败")
             else:
-                log["status"] = "未知状态"
+                log["status"] = "找不到状态按钮"
 
             # [C] 获取到期时间
             try:
-                # 不用 wait_for，用 find_element
                 if sb.is_element_visible("//*[contains(text(), 'expires in')]"):
                     expiry_el = sb.find_element("//*[contains(text(), 'expires in')]")
                     match = re.search(r"expires in\s+([0-9D\sHM]+)", expiry_el.text)
@@ -180,10 +179,8 @@ def run_pella_task(account_line):
             if "D" in log["expiry"]: log["hint"] = "剩余 > 24小时"
             else: log["hint"] = "⚠️ 剩余 < 24小时"
 
-            # [D] 续期检测 (修复崩溃点)
+            # [D] 续期检测 (纯查找，不等待)
             print("👉 检查续期按钮...")
-            # 绝对不要用 wait_for，因为可能没有按钮
-            # 查找所有 button 元素，然后自己过滤文本
             all_buttons = sb.find_elements("button")
             
             claimed_cnt = 0
@@ -192,13 +189,12 @@ def run_pella_task(account_line):
             for btn in all_buttons:
                 try:
                     txt = btn.text
-                    # 你的截图显示已领取的按钮文字是 "Claimed"
                     if "Claimed" in txt:
                         claimed_cnt += 1
-                    # 未领取的通常包含 "Claim" 且不含 "Claimed"
                     elif "Claim" in txt and "Claimed" not in txt:
-                        print(f"👉 点击续期: {txt}")
-                        btn.click()
+                        print(f"👉 JS点击续期: {txt}")
+                        # 同样使用 JS 点击续期按钮
+                        sb.execute_script("arguments[0].click();", btn)
                         click_cnt += 1
                         sb.sleep(3)
                 except: pass
@@ -211,7 +207,6 @@ def run_pella_task(account_line):
             print(f"❌ 发生错误: {e}")
             log["status"] = "脚本出错"
             log["logs"].append(f"Err: {str(e)[:30]}")
-            # 出错截图
             ts = int(time.time())
             sb.save_screenshot(f"screenshots/err_{ts}.png")
         
@@ -219,22 +214,17 @@ def run_pella_task(account_line):
             send_report(log, tg_token, tg_chat_id)
 
 def send_report(log, token, chat_id):
-    # 构建 Telegram 消息
     header_emoji = "ℹ️"
-    # 如果有启动日志，用黄色警告图标
     if "启动" in "".join(log["logs"]): header_emoji = "⚠️"
-    # 如果刚续期了，用庆祝图标
     if "成功续期" in log["renew_status"]: header_emoji = "🎉"
-    # 如果出错了，用红叉
     if "出错" in log["status"] or "Err" in "".join(log["logs"]): header_emoji = "❌"
 
-    # 构建标题动作
     action_text = "无需续期"
     if "启动" in "".join(log["logs"]):
         action_text = "执行了启动操作"
     elif "成功续期" in log["renew_status"]:
         action_text = log["renew_status"]
-    elif "脚本出错" in log["status"]:
+    elif "出错" in log["status"]:
         action_text = "脚本执行出错"
 
     msg = f"""
