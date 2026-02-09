@@ -55,188 +55,200 @@ def run_pella_task(account_line):
     tg_token = parts[3] if len(parts) > 3 else None
     tg_chat_id = parts[4] if len(parts) > 4 else None
 
-    log_info = {
-        "account": mask_email(email), "ip": "Unknown", "status": "Unknown",
-        "expiry": "Unknown", "actions": [], "hint": ""
+    # 初始化日志对象
+    log = {
+        "account": mask_email(email),
+        "ip": "Unknown",
+        "status": "Unknown",      # 运行状态：运行中 / 已停止
+        "expiry": "Unknown",      # 到期时间
+        "renew_status": "Unknown",# 续期状态：无需续期 / 已执行续期
+        "hint": "",               # 提示信息
+        "logs": []                # 操作日志
     }
 
-    print(f"🚀 开始处理账号: {log_info['account']}")
+    print(f"🚀 开始处理: {log['account']}")
 
     with SB(uc=True, test=True, locale="en") as sb:
         try:
-            # 1. 打开登录页
-            print("👉 打开登录页面...")
+            # ----------------- 1. 登录流程 -----------------
+            print("👉 进入登录页...")
             sb.uc_open_with_reconnect(LOGIN_URL, 6)
             
-            # 自动处理验证码 (如果出现)
+            # 尝试过盾
             try: sb.uc_gui_click_captcha(); sb.sleep(2)
             except: pass
 
-            # --- 步骤 1: 输入邮箱 ---
-            print("👉 寻找邮箱输入框...")
-            email_selectors = ['input[placeholder*="email address"]', 'input[name="identifier"]', 'input[type="email"]']
-            
-            email_input = None
-            for sel in email_selectors:
-                if sb.is_element_visible(sel):
-                    email_input = sel
-                    break
-            
-            if not email_input:
-                sb.save_screenshot(f"screenshots/err_no_email.png")
-                raise Exception("找不到邮箱输入框")
-            
-            print(f"👉 输入邮箱并回车: {email}")
-            # ⭐ 修改点：输入邮箱后直接加 \n (回车)，模拟用户按 Enter 键提交
-            sb.type(email_input, email + "\n")
-            sb.sleep(3) # 等待回车生效
+            # === 输入邮箱 ===
+            print("👉 输入邮箱...")
+            # Clerk 专用选择器
+            sb.wait_for_element('input[name="identifier"]', timeout=20)
+            sb.type('input[name="identifier"]', email + "\n") # 使用回车提交
+            sb.sleep(5) # 等待跳转
 
-            # --- 步骤 2: 确认是否跳转到密码页 ---
-            print("👉 检查是否需要输入密码...")
-            
-            # 定义密码框可能的选择器
-            pwd_selectors = ['input[type="password"]', 'input[name="password"]']
-            pwd_found = False
-
-            # 循环检查 5 次 (共15秒)
-            for i in range(5):
-                # 1. 检查密码框
-                for pwd_sel in pwd_selectors:
-                    if sb.is_element_visible(pwd_sel):
-                        print("✅ 密码框已出现")
-                        pwd_found = True
-                        break
-                if pwd_found: break
-
-                # 2. 检查验证码 (Turnstile iframe)
-                if sb.is_element_visible('iframe[src*="challenges"]'):
-                    print("⚠️ 遇到验证码，尝试点击...")
-                    sb.uc_gui_click_captcha()
-                    sb.sleep(3)
-
-                # 3. 还在邮箱页？尝试点击 Continue 按钮补救
-                if sb.is_element_visible('button:contains("Continue")'):
-                    print(f"⚠️ 页面未跳转 (第{i+1}次)，尝试点击 Continue 按钮...")
-                    try:
-                        # 使用 UC 模式的点击，更像真人
-                        sb.uc_click('button:contains("Continue")') 
-                    except:
-                        sb.click('button:contains("Continue")')
-                
-                sb.sleep(3)
-
-            if not pwd_found:
-                raise Exception("无法进入密码输入界面 (卡在邮箱页或验证码)")
-
-            # --- 步骤 3: 输入密码 ---
+            # === 输入密码 ===
             print("👉 输入密码...")
-            # 再次确认具体的密码框选择器
-            final_pwd_sel = 'input[name="password"]'
-            if not sb.is_element_visible(final_pwd_sel):
-                final_pwd_sel = 'input[type="password"]'
+            # 检查是否成功跳转到密码页
+            if not sb.is_element_visible('input[name="password"]'):
+                # 如果没跳转，尝试补点一下 Continue
+                if sb.is_element_visible('button:contains("Continue")'):
+                    sb.uc_click('button:contains("Continue")')
+                    sb.sleep(3)
             
-            sb.type(final_pwd_sel, password + "\n") # 同样使用回车提交
+            sb.wait_for_element('input[name="password"]', timeout=15)
+            sb.type('input[name="password"]', password + "\n") # 使用回车提交
             sb.sleep(5)
             
-            # 如果回车没登录，尝试点击登录按钮
-            if sb.is_element_visible('button:contains("Continue")'):
-                 print("👉 点击 Continue 登录...")
-                 sb.uc_click('button:contains("Continue")')
-
-            # --- 步骤 4: 等待登录成功 ---
-            print("👉 等待进入主页...")
+            # 确保登录成功 (等待 Dashboard 元素)
+            print("👉 等待 Dashboard...")
             sb.wait_for_element('a[href*="/server/"]', timeout=30)
             print("✅ 登录成功")
 
-            # 2. 直达服务器详情页
+            # ----------------- 2. 进入服务器 -----------------
             target_url = SERVER_URL_TEMPLATE.format(server_id=server_id)
-            print(f"👉 进入服务器页面: {target_url}")
+            print(f"👉 跳转服务器: {target_url}")
             sb.open(target_url)
-            sb.sleep(8) 
+            sb.sleep(8) # 等待动态资源加载
 
-            # 获取 IP
+            # ----------------- 3. 提取信息与操作 -----------------
+            
+            # [A] 获取 IP (尝试从控制台文本或页面提取)
             try:
-                txt = sb.get_text("body")
-                ip = re.search(r'\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b', txt)
-                log_info["ip"] = ip.group(0) if ip else f"ID: {server_id[:8]}..."
+                page_text = sb.get_text("body")
+                # 匹配 IP 格式，排除版本号
+                ips = re.findall(r'\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b', page_text)
+                # 过滤掉常见的非公网 IP
+                valid_ips = [ip for ip in ips if not ip.startswith("127.") and not ip.startswith("255.") and "0.0.0.0" not in ip]
+                if valid_ips:
+                    log["ip"] = valid_ips[0]
+                elif "0.0.0.0" in page_text:
+                    log["ip"] = "0.0.0.0"
+                else:
+                    log["ip"] = f"ID: {server_id[:6]}..."
             except: pass
 
-            # 检查状态
-            if sb.is_element_visible('button:contains("START")'):
-                print("⚠️ 启动服务器...")
-                sb.click('button:contains("START")')
-                log_info["actions"].append("已执行启动")
+            # [B] 判断服务器状态 (START / STOP)
+            # 逻辑：有 STOP 按钮 -> 运行中；有 START 按钮 -> 已停止
+            if sb.is_element_visible('button:contains("STOP")'):
+                print("✅ 检测到 STOP 按钮 -> 服务器运行中")
+                log["status"] = "运行中"
+            
+            elif sb.is_element_visible('button:contains("START")'):
+                print("⚠️ 检测到 START 按钮 -> 服务器已停止")
+                log["status"] = "已停止"
+                # 执行启动
+                print("👉 点击启动...")
+                sb.uc_click('button:contains("START")')
                 sb.sleep(5)
-                log_info["status"] = "启动中"
-            elif sb.is_element_visible('button:contains("STOP")'):
-                print("✅ 运行中")
-                log_info["status"] = "运行中"
+                log["logs"].append("已执行启动指令")
+                log["status"] = "启动中"
+            
             else:
-                log_info["status"] = "未知"
+                log["status"] = "状态未知 (未找到按钮)"
 
-            # 获取时间
+            # [C] 获取到期时间
             try:
-                txt = sb.get_text("body")
-                match = re.search(r"expires in\s+([^\.]+)\.", txt, re.IGNORECASE)
-                log_info["expiry"] = match.group(1).strip() if match else "未找到"
-            except: log_info["expiry"] = "Error"
-            
-            if "D" in log_info["expiry"]: log_info["hint"] = "剩余 > 24小时"
-            else: log_info["hint"] = "⚠️ 剩余 < 24小时"
+                # 查找类似 "Your server expires in 1D 13H 25M"
+                # 使用 XPath 定位包含 expires in 的文本节点
+                expiry_element = sb.find_element("//*[contains(text(), 'expires in')]")
+                raw_text = expiry_element.text
+                match = re.search(r"expires in\s+([0-9D\sHM]+)", raw_text, re.IGNORECASE)
+                if match:
+                    log["expiry"] = match.group(1).strip()
+                else:
+                    log["expiry"] = "时间解析失败"
+            except:
+                log["expiry"] = "未找到时间元素"
 
-            # 续期
-            print("👉 检查续期...")
-            btns = sb.find_elements('button:contains("Claim")')
-            cnt = 0
-            for btn in btns:
-                try:
-                    if "Claimed" not in btn.text:
-                        print(f"👉 点击: {btn.text}")
-                        btn.click()
-                        cnt += 1
-                        sb.sleep(3)
-                except: pass
+            # 设置提示
+            if "D" in log["expiry"]:
+                log["hint"] = "剩余 > 24小时"
+            else:
+                log["hint"] = "⚠️ 剩余 < 24小时，请注意"
+
+            # [D] 续期检测 (Claim / Claimed)
+            print("👉 检查续期按钮...")
+            # 查找所有按钮
+            buttons = sb.find_elements("button")
+            claim_btns = [b for b in buttons if "Claim" in b.text]
             
-            if cnt > 0: log_info["actions"].append(f"续期 {cnt} 次")
-            if not log_info["actions"]: log_info["actions"].append("无操作")
+            claimed_count = 0
+            to_claim_count = 0
+            
+            if not claim_btns:
+                log["renew_status"] = "未找到按钮"
+            else:
+                for btn in claim_btns:
+                    btn_text = btn.text
+                    if "Claimed" in btn_text:
+                        claimed_count += 1
+                    elif "Claim" in btn_text:
+                        # 需要续期 (例如 "16 HOURS Claim")
+                        print(f"👉 点击续期: {btn_text}")
+                        try:
+                            btn.click()
+                            to_claim_count += 1
+                            sb.sleep(2)
+                        except:
+                            log["logs"].append("点击续期失败")
+
+                if to_claim_count > 0:
+                    log["renew_status"] = f"成功续期 {to_claim_count} 次"
+                elif claimed_count > 0:
+                    log["renew_status"] = "无需续期 (已Claimed)"
+                else:
+                    log["renew_status"] = "未知状态"
 
         except Exception as e:
-            print(f"❌ 错误: {e}")
-            log_info["status"] = "出错"
-            log_info["actions"].append(f"Err: {str(e)[:40]}")
-            # 截图
+            print(f"❌ 发生错误: {e}")
+            log["status"] = "脚本出错"
+            log["logs"].append(f"Err: {str(e)[:50]}")
+            # 截图保存
             ts = int(time.time())
-            sname = f"screenshots/err_{email.split('@')[0]}_{ts}.png"
-            sb.save_screenshot(sname)
-            print(f"📸 截图: {sname}")
+            sb.save_screenshot(f"screenshots/err_{ts}.png")
         
         finally:
-            send_report(log_info, tg_token, tg_chat_id)
+            send_report(log, tg_token, tg_chat_id)
 
-def send_report(info, token, chat_id):
-    action_str = " | ".join(info["actions"])
-    emoji = "⚠️" if "启动" in action_str else ("🎉" if "续期" in action_str else "ℹ️")
-    if "Err" in action_str: emoji = "❌"
+def send_report(log, token, chat_id):
+    # 根据用户要求的格式构建消息
+    # 🎮 Pella 续期通知
+    # 🆔 账号: ...
+    # 🖥 IP: ...
+    # ⏰ 时间: ...
+    #
+    # ℹ️ 无需续期 (或者其他状态)
+    # 📅 状态: 运行中
+    # ⏳ 剩余: ...
+    # 💡 提示: ...
     
+    header_emoji = "ℹ️"
+    if "启动" in "".join(log["logs"]): header_emoji = "⚠️"
+    if "成功续期" in log["renew_status"]: header_emoji = "🎉"
+    if "出错" in log["status"]: header_emoji = "❌"
+
     msg = f"""
 <b>🎮 Pella 续期通知</b>
-🆔 账号: <code>{info['account']}</code>
-🖥 IP: <code>{info['ip']}</code>
+🆔 账号: <code>{log['account']}</code>
+🖥 IP: <code>{log['ip']}</code>
 ⏰ 时间: {get_beijing_time()}
 
-{emoji} <b>{action_str}</b>
-📊 状态: {info['status']}
-⏳ 剩余: <b>{info['expiry']}</b>
-💡 提示: {info['hint']}
+{header_emoji} <b>{log['renew_status']}</b>
+📊 状态: <b>{log['status']}</b>
+⏳ 剩余: {log['expiry']}
+💡 提示: {log['hint']}
 """
+    # 如果有额外日志（如启动了服务器），附在最后
+    if log["logs"]:
+        msg += f"\n📝 操作: {' | '.join(log['logs'])}"
+
     send_telegram(token, chat_id, msg)
 
 if __name__ == "__main__":
-    batch = os.getenv(ENV_VAR_NAME)
-    if not batch: sys.exit(1)
+    batch_data = os.getenv(ENV_VAR_NAME)
+    if not batch_data: sys.exit(1)
     
     display = setup_xvfb()
-    for line in batch.strip().splitlines():
+    for line in batch_data.strip().splitlines():
         if line.strip() and not line.startswith("#"):
             run_pella_task(line)
             time.sleep(5)
