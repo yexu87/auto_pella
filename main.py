@@ -11,10 +11,9 @@ from pyvirtualdisplay import Display
 # ================= 配置区域 =================
 ENV_VAR_NAME = "PELLA_BATCH"
 LOGIN_URL = "https://www.pella.app/login"
-# 注意：这里保持模板，具体ID由环境变量传入，或者您可以临时硬编码调试
-SERVER_URL_TEMPLATE = "https://www.pella.app/server/{server_id}" 
+SERVER_URL_TEMPLATE = "https://www.pella.app/server/{server_id}"
 
-# ... (辅助函数 setup_xvfb, mask_email, get_beijing_time, send_telegram 保持不变) ...
+# ================= 辅助函数 =================
 def setup_xvfb():
     if platform.system().lower() == "linux" and not os.environ.get("DISPLAY"):
         display = Display(visible=False, size=(1920, 1080))
@@ -44,9 +43,6 @@ def send_telegram(token, chat_id, message):
 
 # ================= 核心逻辑 =================
 def run_pella_task(account_line):
-    # 确保保存截图的文件夹存在
-    os.makedirs("debug_screenshots", exist_ok=True)
-    
     parts = [p.strip() for p in account_line.split(",")]
     if len(parts) < 3: return
 
@@ -62,7 +58,7 @@ def run_pella_task(account_line):
 
     with SB(uc=True, test=True, locale="en") as sb:
         try:
-            # --- 1. 登录 ---
+            # --- 1. 登录 (保持不变) ---
             print("👉 登录...")
             sb.uc_open_with_reconnect(LOGIN_URL, 6)
             try: sb.uc_gui_click_captcha(); sb.sleep(2)
@@ -80,39 +76,18 @@ def run_pella_task(account_line):
             print("✅ 登录成功")
 
             # --- 2. 进入服务器 ---
-            # 如果您想强制进入特定 URL 截图，可以直接修改这里，或者确保环境变量里的 server_id 是对的
-            # target_url = "https://www.pella.app/server/ede5a65efe6644549de444a2cf46dbe0" 
             target_url = SERVER_URL_TEMPLATE.format(server_id=server_id)
-            
-            print(f"👉 跳转服务器: {target_url}")
+            print(f"👉 跳转: {target_url}")
             sb.open(target_url)
-            sb.sleep(10) # 等待完全加载
+            sb.sleep(8) 
 
-            # ===============================================
-            # 📸 截图并保存 HTML (新增部分)
-            # ===============================================
-            print("📸 正在截图...")
-            # 使用时间戳防止文件名冲突
-            ts = int(time.time())
-            screenshot_name = f"debug_screenshots/page_{server_id}_{ts}.png"
-            sb.save_screenshot(screenshot_name)
-            
-            # 保存 HTML 源码以便查看元素结构
-            html_name = f"debug_screenshots/source_{server_id}_{ts}.html"
-            with open(html_name, "w", encoding="utf-8") as f:
-                f.write(sb.get_page_source())
-            
-            print(f"✅ 截图已保存: {screenshot_name}")
-            log["logs"].append("已执行截图")
-
-            # --- 3. 获取信息 (保持原有逻辑) ---
+            # --- 3. 获取信息 ---
             try:
                 txt = sb.get_text("body")
-                # IP
                 ips = re.findall(r'\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b', txt)
                 valid = [i for i in ips if not i.startswith("127.") and "0.0.0.0" not in i]
                 log["ip"] = valid[0] if valid else ("0.0.0.0" if "0.0.0.0" in txt else "ID: "+server_id[:6])
-                # Expiry
+                
                 match = re.search(r"expires in\s+([0-9D\sHM]+)", txt)
                 log["expiry"] = match.group(1).strip() if match else "Error"
             except: pass
@@ -120,84 +95,85 @@ def run_pella_task(account_line):
             if "D" in log["expiry"]: log["hint"] = "剩余 > 24小时"
             else: log["hint"] = "⚠️ 剩余 < 24小时"
 
-            # ... (后续的视觉扫描和续期逻辑保持不变) ...
-            
-            # (为了节省篇幅，后续代码省略，请保持您原有代码的后续部分)
-            # 只要确保上面的截图代码块添加了即可
-
             # ===============================================
-            # 🔍 视觉暴力搜索 (不依赖文字，依赖颜色和特征)
+            # ⚡️ 核心修复：精准定位 START/STOP 按钮
             # ===============================================
-            print("👉 开始视觉扫描按钮...")
             
-            # ... (保持原有代码不变) ...
-            
-            # 获取所有可能是按钮的元素 (button, a, div)
-            candidates = sb.find_elements("button") + sb.find_elements("a.btn") + sb.find_elements("div[role='button']")
-            
-            start_btn = None
-            stop_btn = None
-            claim_btns = []
+            # 定义精准的选择器 (基于你提供的源码)
+            # STOP 按钮通常是红色的 bg-brand-red 或包含 STOP 文字
+            STOP_SELECTOR = "button:contains('STOP')"
+            # START 按钮类名包含 bg-brand-green
+            START_SELECTOR = "button.bg-brand-green" 
 
-            for el in candidates:
-                try:
-                    # 获取元素的 HTML 和 文本
-                    html = el.get_attribute("outerHTML").lower()
-                    text = el.text.upper()
-                    
-                    # 1. 识别 STOP (红色按钮)
-                    if "stop" in text or "bg-red" in html:
-                        stop_btn = el
-                    
-                    # 2. 识别 START (绿色按钮)
-                    if "start" in text or "bg-green" in html or "bg-emerald" in html:
-                        if "RESTART" not in text:
-                            start_btn = el
-                    
-                    # 3. 识别 Claim (紫色/灰色)
-                    if "claim" in html or "claim" in text.lower():
-                        claim_btns.append(el)
-                        
-                except: pass
-
-            # --- 逻辑判断 ---
-            if stop_btn:
-                print("✅ 发现红色按钮 -> 状态: 运行中")
+            print("👉 检查服务器状态...")
+            
+            # 1. 优先检查是否正在运行 (STOP 按钮存在)
+            if sb.is_element_visible(STOP_SELECTOR):
+                print("✅ 状态: 运行中 (找到 STOP 按钮)")
                 log["status"] = "运行中"
-            elif start_btn:
-                print("⚠️ 发现绿色按钮 -> 状态: 已停止")
+            
+            # 2. 检查是否需要启动 (START 按钮存在)
+            elif sb.is_element_visible(START_SELECTOR):
+                print("⚠️ 状态: 已停止 (找到 START 按钮)")
                 log["status"] = "已停止"
-                print("👉 执行 JS 强力点击启动...")
+                
+                print("👉 执行启动操作...")
+                # 获取按钮元素
+                start_btn = sb.find_element(START_SELECTOR)
+                
+                # 使用 JS 点击 (最稳妥)
                 sb.execute_script("arguments[0].click();", start_btn)
+                sb.sleep(2)
+                
+                # 二次确认：有时点击没反应，再点一次
+                if sb.is_element_visible(START_SELECTOR):
+                    print("👉 再次尝试点击...")
+                    sb.click(START_SELECTOR)
+                
                 sb.sleep(5)
-                # ... 检查结果 ...
-                logs = sb.get_text("body")[-1000:]
-                if "Starting" in logs or "Booting" in logs:
+                
+                # 检查控制台日志 (源码显示 console 在 pre 标签里)
+                console_text = sb.get_text("pre")
+                if "Starting" in console_text or "Booting" in console_text:
                     log["status"] = "启动指令已发"
                     log["logs"].append("已触发启动")
                 else:
+                    # 刷新页面看状态变了没
                     sb.refresh()
                     sb.sleep(5)
-                    if sb.is_element_visible("button:contains('STOP')") or sb.is_element_visible(".bg-red-500"):
+                    if sb.is_element_visible(STOP_SELECTOR):
                         log["status"] = "启动成功"
                     else:
-                        log["logs"].append("点击后状态未变")
+                        log["logs"].append("点击后无反应")
             else:
-                log["status"] = "未找到控制按钮"
-                log["logs"].append("按钮定位失败")
+                # 兜底逻辑：如果在源码里找不到特定 class，尝试找文字
+                print("⚠️ 未找到标准按钮，尝试文字匹配...")
+                if sb.is_element_visible("//button[contains(., 'START')]"):
+                    sb.execute_script("arguments[0].click();", sb.find_element("//button[contains(., 'START')]"))
+                    log["logs"].append("触发备用启动")
+                    log["status"] = "尝试启动(备用)"
+                else:
+                    log["status"] = "按钮定位失败"
 
-            # --- 续期处理 ---
-            print(f"👉 发现 {len(claim_btns)} 个续期相关元素")
+            # --- 续期处理 (根据源码优化) ---
+            print("👉 检查续期...")
+            # 源码显示 Claim 按钮可能是 <a> 标签且包含 'Claim'
+            # <a ...>Claimed...</a>
+            # 我们查找所有包含 Claim 文本的 <a> 或 <button>
+            
+            claim_candidates = sb.find_elements("a:contains('Claim')") + sb.find_elements("button:contains('Claim')")
+            
             clicked_cnt = 0
             claimed_cnt = 0
-            for btn in claim_btns:
+            
+            for el in claim_candidates:
                 try:
-                    t = btn.text.upper()
-                    if "CLAIMED" in t:
+                    txt = el.text
+                    if "Claimed" in txt:
                         claimed_cnt += 1
-                    elif "HOURS" in t or "CLAIM" in t:
-                        print(f"👉 点击续期: {t}")
-                        sb.execute_script("arguments[0].click();", btn)
+                    elif "Claim" in txt: # 未领取的按钮
+                        print(f"👉 点击续期: {txt}")
+                        sb.execute_script("arguments[0].click();", el)
                         clicked_cnt += 1
                         sb.sleep(2)
                 except: pass
@@ -209,25 +185,24 @@ def run_pella_task(account_line):
         except Exception as e:
             print(f"❌ 错误: {e}")
             log["logs"].append(f"Err: {str(e)[:30]}")
-            ts = int(time.time())
-            # 错误时也截图
-            sb.save_screenshot(f"debug_screenshots/err_{ts}.png")
         finally:
             send_report(log, tg_token, tg_chat_id)
 
-# ... (辅助函数 send_report 和 main 入口保持不变) ...
 def send_report(log, token, chat_id):
     header = "ℹ️"
     if "启动" in "".join(log["logs"]): header = "⚠️"
     if "成功续期" in log["renew_status"]: header = "🎉"
+    
     act = "无需续期"
-    if "启动" in "".join(log["logs"]): act = "执行了启动操作"
+    if "启动" in "".join(log["logs"]) or "启动" in log["status"]: act = "执行了启动操作"
     elif "成功续期" in log["renew_status"]: act = log["renew_status"]
+
     msg = f"""
 <b>🎮 Pella 续期通知</b>
 🆔 账号: <code>{log['account']}</code>
 🖥 IP: <code>{log['ip']}</code>
 ⏰ 时间: {get_beijing_time()}
+
 {header} <b>{act}</b>
 📊 状态: <b>{log['status']}</b>
 ⏳ 剩余: {log['expiry']}
